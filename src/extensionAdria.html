@@ -14,12 +14,13 @@
           const vscode = acquireVsCodeApi();
 
         $(document).ready(function() {
-            $('#logsTable').DataTable();
+            $('#logsTable').DataTable({"order": [[3, "desc"]]});
+            
         });
 
         document.addEventListener('DOMContentLoaded', () => {
             document.querySelectorAll('#logsTable tbody tr').forEach(row => {
-                row.addEventListener('click', () => {
+                row.addEventListener('dblclick', () => {
                     // Get ID from the row
                     const id = row.cells[0].innerText;
 
@@ -33,7 +34,6 @@
 </head>
 
 <body>
-    <h1>Salesforce Logs</h1>
     <table id="logsTable" class="display">
         <thead>
             <tr>

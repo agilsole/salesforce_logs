@@ -2,113 +2,153 @@ import * as vscode from 'vscode';
 import * as childProcess from 'child_process';
 import * as fs from 'fs';
 
-// structure of a log object
 interface Log {
     Id: string;
     Application: string;
     Operation: string;
     StartTime: string;
     Status: string;
-    LogUser?: { Name: string }; 
+    LogUser?: { Name: string };
     LogLength: string;
 }
 
+let intervalId: NodeJS.Timeout | undefined;
+let panel: vscode.WebviewPanel | undefined;
 
 // Called when the extension is activated
 export async function activate(context: vscode.ExtensionContext) {
-
     const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left);
-    statusBarItem.text = '$(globe)'; // Icon for the status bar
+    statusBarItem.text = '$(output)';// Icon for the status bar
     statusBarItem.tooltip = 'AG:Analyzer';
     statusBarItem.command = 'extension.showSalesforceLogs';
     statusBarItem.show();
 
     let disposable = vscode.commands.registerCommand('extension.showSalesforceLogs', async () => {
-        // Show loading notification
-        const loadingMessage = vscode.window.setStatusBarMessage('Loading Salesforce logs...');
+        //notification en la Status Bar
+        const loadingMessage = vscode.window.setStatusBarMessage('Loading Salesforce logs extension...');
       
         try {
-            // Retrieve logs from Salesforce using sfdx connection
+            //Obtener los logs
             const logs = await retrieveLogs(context);
-    
-            // Dismiss loading notification status bar
             loadingMessage.dispose();
     
             //Enviar los logs al HTML
             sendLogsToWebview(context, logs);
 
         } catch (error) {
-
-            loadingMessage.dispose();
-    
-            // Show error in the panel
+            //Mostrar mensaje de error
+            loadingMessage.dispose(); 
             const errorMessage = typeof error === 'string' ? error : String(error);
             vscode.window.showInformationMessage(errorMessage);
         }
         
     });
+
     context.subscriptions.push(disposable);
+    //createOrShowWebview(context);
+    startFetchingLogs(context);
 }
 
+// Function to send logs to the webview
+function sendLogsToWebview(context: vscode.ExtensionContext, logs: any[]) {
+    createOrShowWebview(context);
+    updateWebviewContent(logs, context);
+}
 
-// Function to retrieve Salesforce logs to the datatable
-async function retrieveLogs(context: vscode.ExtensionContext): Promise<any[]> {
-    try {
-        // Display a progress notification while retrieving logs
-        return await vscode.window.withProgress({
-            location: vscode.ProgressLocation.Notification,
-            title: 'Retrieving Salesforce Logs',
-            cancellable: false
-        }, async (progress) => {
-            // Execute command to display org info
-            //const orgResult = await executeCommand('sfdx force:org:display --json');
+//Crear o mostrar el WebView 
+function createOrShowWebview(context: vscode.ExtensionContext) {
+    if (!panel) {
+        panel = vscode.window.createWebviewPanel(
+            'aglogs', // Use the ID specified in package.json
+            'Salesforce Logs',
+            vscode.ViewColumn.One,
+            { enableScripts: true }
+        );
 
-            // Execute command to retrieve logs
-            const command = 'sfdx force:data:soql:query -q "SELECT Id, Application, Operation, StartTime, Status,LogUser.Name, LogLength  FROM ApexLog ORDER BY SystemModstamp desc LIMIT 20" --json';
-            const result = await executeCommand(command);
+        // Handle messages sent from the webview
+        panel.webview.onDidReceiveMessage(async (message) => {
+            if (message.command === 'callFunction') {
+                const id = message.id; // ID del LOG
+                console.log('Clicked row ID:', id);
 
-            // Check if result has records property
-            if (result && result.result && result.result.records) {
-                return result.result.records;
-            } else {
-                throw new Error('No records found in the result');
+                try {
+                    await retrieveFullLog(context, id);
+                } catch (error) {
+                    vscode.window.showErrorMessage('Failed to retrieve full log: ' + error);
+                }
             }
         });
+
+         //Si se cierra el panel se deja de obtener logs
+         panel.onDidDispose(() => {
+            stopFetchingLogs(); // Call method to stop fetching logs
+            panel = undefined; // Reset panel reference
+        });
+        
+    } else {
+        //El panel ya existe
+        panel.reveal(vscode.ViewColumn.One);
+    }
+}
+
+//Parar de obtener logs periodicamentem (falta añadirlo)
+function stopFetchingLogs() {
+    if (intervalId) {
+        clearInterval(intervalId);
+        intervalId = undefined;
+    }
+}
+
+//Obtener logs periodicamente
+function startFetchingLogs(context: vscode.ExtensionContext) {
+    //Obtener logs la primera vez
+    fetchAndSendLogs(context);
+
+    //Obtener logs cada 5s
+    intervalId = setInterval(() => {
+        console.log('refrescando logs');
+        fetchAndSendLogs(context);
+    }, 5000); 
+}
+
+// Function to fetch logs and send them to the webview
+async function fetchAndSendLogs(context: vscode.ExtensionContext) {
+    try {
+        const logs = await retrieveLogs(context);
+        updateWebviewContent(logs, context); //Actualizar el html del webview
+    } catch (error) {
+        vscode.window.showErrorMessage('Failed to retrieve logs: ' + error);
+    }
+}
+
+// Actualizar el contenido del HTML WebView con los nuevos logs
+function updateWebviewContent(logs: any[], context: vscode.ExtensionContext) {
+    if (panel) {
+        const logsJSON = JSON.stringify(logs);
+        const logsHtml = getLogsHtml(logsJSON, context);
+        panel.webview.html = logsHtml;
+    } else {
+        console.error('Webview panel not initialized');
+    }
+}
+
+// Obtener los logs de la org
+async function retrieveLogs(context: vscode.ExtensionContext): Promise<any[]> {
+    try {
+
+        const command = 'sfdx force:data:soql:query -q "SELECT Id, Application, Operation, StartTime, Status,LogUser.Name, LogLength FROM ApexLog ORDER BY SystemModstamp DESC LIMIT 20" --json';
+        const result = await executeCommand(command);
+
+        // Check if result has records property
+        if (result && result.result && result.result.records) {
+            return result.result.records;
+        } else {
+            throw new Error('No hay registros para mostrar');
+        }
     } catch (error) {
         throw new Error('Failed to retrieve Salesforce logs: ' + error);
     }
 }
-
-// Send logs to the webview
-function sendLogsToWebview(context: vscode.ExtensionContext, logs: any[]) {
-    createWebviewPanel(context, JSON.stringify(logs));
-}
-
-async function createWebviewPanel(context: vscode.ExtensionContext, logs: string) {
-    const panel = vscode.window.createWebviewPanel(
-        'aglogs', // Use the ID specified in package.json
-        'Salesforce Logs',
-        vscode.ViewColumn.One,
-        { enableScripts: true }
-    );
-
-    panel.webview.html = getLogsHtml(logs, context);
-
-    // Handle messages sent from the webview
-    panel.webview.onDidReceiveMessage(async (message) => {
-        if (message.command === 'callFunction') {
-            const id = message.id; // ID del LOG
-            console.log('Clicked row ID:', id);
-    
-            try {
-                await retrieveFullLog(context, id);
-            } catch (error) {
-                vscode.window.showErrorMessage('Failed to retrieve full log: ' + error);
-            }
-        }
-    });
-}
-
 
 async function retrieveFullLog(context: vscode.ExtensionContext, id: string): Promise<void> {
     try {
@@ -133,13 +173,13 @@ async function retrieveFullLog(context: vscode.ExtensionContext, id: string): Pr
     }
 }
 
-// Function to get HTML content for displaying log records
+// Mapear estructura de los logs al fichero html
 function getLogsHtml(logsJSON: string, context: vscode.ExtensionContext): string {
     try {
         const htmlPath = vscode.Uri.joinPath(context.extensionUri, 'src/extensionAdria.html');
         const htmlContent = fs.readFileSync(htmlPath.fsPath, 'utf8');
 
-        const logs: Log[] = JSON.parse(logsJSON); // Assuming errorMessage is actually logsJSON
+        const logs: Log[] = JSON.parse(logsJSON); 
 
         const logsHtml = logs.map((log: Log) => `
             <tr>
@@ -156,10 +196,8 @@ function getLogsHtml(logsJSON: string, context: vscode.ExtensionContext): string
 
     } catch (error) {
         throw new Error('Failed to retrieve the html: ' + error);
-        return ''; // Return empty string if error occurs
     }
 }
-
 
 //EJECUTAR COMANDOS
 function executeCommand(command: string): Promise<any> {
